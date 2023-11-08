@@ -31,7 +31,6 @@
 ** This program is distributed in the hope that it will be useful,
 ** but without any warranty; without even the implied warranty of
 ** merchantability or fitness for a particular purpose.
-** appropriate header files.
 */
 #include <stdio.h>
 #include <stdlib.h>
@@ -302,7 +301,7 @@ struct InFile {
 typedef struct String String;
 struct String {
   int nAlloc;      /* Number of bytes allocated */
-  int nUsed;       /* Number of bytes used (not counting null terminator) */
+  int nUsed;       /* Number of bytes used (not counting nul terminator) */
   char *zText;     /* Text of the string */
 };
 
@@ -597,7 +596,8 @@ static Decl *CreateDecl(
   pDecl = SafeMalloc( sizeof(Decl) + nName + 1);
   memset(pDecl,0,sizeof(Decl));
   pDecl->zName = (char*)&pDecl[1];
-  sprintf(pDecl->zName,"%.*s",nName,zName);
+  memcpy(pDecl->zName, zName, nName);
+  pDecl->zName[nName] = 0;
   pDecl->zFile = zFilename;
   pDecl->pInclude = includeList;
   pDecl->zIf = GetIfString();
@@ -630,7 +630,8 @@ static int IdentTableInsert(
   }
   pId = SafeMalloc( sizeof(Ident) + nId + 1 );
   pId->zName = (char*)&pId[1];
-  sprintf(pId->zName,"%.*s",nId,zId);
+  memcpy(pId->zName, zId, nId);
+  pId->zName[nId] = 0;
   pId->pNext = pTable->pList;
   pTable->pList = pId;
   pId->pCollide = pTable->apTable[h];
@@ -1019,7 +1020,10 @@ static int GetNonspaceToken(InStream *pIn, Token *pToken){
        pToken->eType!=TT_Space ? pToken->zText : "<space>"); */
     pToken->pComment = blockComment;
     switch( pToken->eType ){
-      case TT_Comment:
+      case TT_Comment:          /*0123456789 12345678 */
+       if( strncmp(pToken->zText, "/*MAKEHEADERS-STOP", 18)==0 ) return nErr;
+       break;
+
       case TT_Space:
         break;
 
@@ -1108,7 +1112,7 @@ static void FindIdentifiersInMacro(Token *pToken, IdentTable *pTable){
 ** unterminated token.
 */
 static int GetBigToken(InStream *pIn, Token *pToken, IdentTable *pTable){
-  const char *z, *zStart;
+  const char *zStart;
   int iStart;
   int nBrace;
   int c;
@@ -1137,7 +1141,6 @@ static int GetBigToken(InStream *pIn, Token *pToken, IdentTable *pTable){
       return nErr;
   }
 
-  z = pIn->z;
   iStart = pIn->i;
   zStart = pToken->zText;
   nLine = pToken->nLine;
@@ -1406,6 +1409,7 @@ static char *TokensToString(
         }
         if( skipOne ){
           pFirst = pFirst->pNext;
+          skipOne = 0;
           continue;
         }
         /* Fall thru to the next case */
@@ -1472,6 +1476,7 @@ static int ProcessTypeDecl(Token *pList, int flags, int *pReset){
   for(pEnd=pName->pNext; pEnd && pEnd->eType!=TT_Braces; pEnd=pEnd->pNext){
     switch( pEnd->zText[0] ){
       case '(':
+      case ')':
       case '*':
       case '[':
       case '=':
@@ -1683,14 +1688,12 @@ static Token *FindDeclName(Token *pFirst, Token *pLast){
 ** added to their class definitions.
 */
 static int ProcessMethodDef(Token *pFirst, Token *pLast, int flags){
-  Token *pCode;
   Token *pClass;
   char *zDecl;
   Decl *pDecl;
   String str;
   int type;
 
-  pCode = pLast;
   pLast = pLast->pPrev;
   while( pFirst->zText[0]=='P' ){
     int rc = 1;
@@ -1735,6 +1738,16 @@ static int ProcessMethodDef(Token *pFirst, Token *pLast, int flags){
   }
   StringAppend(&str, "  ", 0);
   zDecl = TokensToString(pFirst, pLast, ";\n", pClass, 2);
+  if(strncmp(zDecl, pClass->zText, pClass->nText)==0){
+    /* If member initializer list is found after a constructor,
+    ** skip that part. */
+    char * colon = strchr(zDecl, ':');
+    if(colon!=0 && colon[1]!=0){
+      *colon++ = ';';
+      *colon++ = '\n';
+      *colon = 0;
+    }
+  }
   StringAppend(&str, zDecl, 0);
   SafeFree(zDecl);
   pDecl->zExtra = StrDup(StringGet(&str), 0);
@@ -1785,7 +1798,10 @@ static int ProcessProcedureDef(Token *pFirst, Token *pLast, int flags){
       zFilename, pFirst->nLine);
     return 1;
   }
-
+  if( strncmp(pName->zText,"main",pName->nText)==0 ){
+    /* skip main() decl. */
+    return 0;
+  }
   /*
   ** At this point we've isolated a procedure declaration between pFirst
   ** and pLast with the name pName.
@@ -1904,6 +1920,18 @@ static int isVariableDef(Token *pFirst, Token *pEnd){
   return 1;
 }
 
+/*
+** Return TRUE if pFirst is the first token of a static assert.
+*/
+static int isStaticAssert(Token *pFirst){
+  if( (pFirst->nText==13 && strncmp(pFirst->zText, "static_assert", 13)==0)
+   || (pFirst->nText==14 && strncmp(pFirst->zText, "_Static_assert", 14)==0)
+  ){
+    return 1;
+  }else{
+    return 0;
+  }
+}
 
 /*
 ** This routine is called whenever we encounter a ";" or "=".  The stuff
@@ -1962,6 +1990,8 @@ static int ProcessDecl(Token *pFirst, Token *pEnd, int flags){
   }else if( flags & PS_Method ){
     /* Methods are declared by their class.  Don't declare separately. */
     return nErr;
+  }else if( isStaticAssert(pFirst) ){
+    return 0;
   }
   isVar =  (flags & (PS_Typedef|PS_Method))==0 && isVariableDef(pFirst,pEnd);
   if( isVar && (flags & (PS_Interface|PS_Export|PS_Local))!=0
@@ -1972,9 +2002,14 @@ static int ProcessDecl(Token *pFirst, Token *pEnd, int flags){
   }
   pName = FindDeclName(pFirst,pEnd->pPrev);
   if( pName==0 ){
-    fprintf(stderr,"%s:%d: Can't find a name for the object declared here.\n",
-      zFilename, pFirst->nLine);
-    return nErr+1;
+    if( pFirst->nText==4 && strncmp(pFirst->zText,"enum",4)==0 ){
+      /* Ignore completely anonymous enums.  See documentation section 3.8.1. */
+      return nErr;
+    }else{
+      fprintf(stderr,"%s:%d: Can't find a name for the object declared here.\n",
+        zFilename, pFirst->nLine);
+      return nErr+1;
+    }
   }
 
 #ifdef DEBUG
@@ -2045,9 +2080,14 @@ static void PushIfMacro(
   if( zText ){
     pIf->zCondition = (char*)&pIf[1];
     if( zPrefix ){
-      sprintf(pIf->zCondition,"%s(%.*s)",zPrefix,nText,zText);
+      int nPrefix = (int)strlen(zPrefix);
+      memcpy(pIf->zCondition, zPrefix, nPrefix);
+      pIf->zCondition[nPrefix] = '(';
+      memcpy(&pIf->zCondition[nPrefix+1], zText, nText);
+      memcpy(&pIf->zCondition[nPrefix+nText+1], ")", 2);
     }else{
-      sprintf(pIf->zCondition,"%.*s",nText,zText);
+      memcpy(pIf->zCondition, zText, nText);
+      pIf->zCondition[nText] = 0;
     }
   }else{
     pIf->zCondition = 0;
@@ -2123,7 +2163,8 @@ static int ParsePreprocessor(Token *pToken, int flags, int *pPresetFlags){
     pDecl->pComment = pToken->pComment;
     DeclSetProperty(pDecl,TY_Macro);
     pDecl->zDecl = SafeMalloc( pToken->nText + 2 );
-    sprintf(pDecl->zDecl,"%.*s\n",pToken->nText,pToken->zText);
+    memcpy(pDecl->zDecl, pToken->zText, pToken->nText);
+    memcpy(&pDecl->zDecl[pToken->nText], "\n", 2);
     if( flags & PS_Export ){
       DeclSetProperty(pDecl,DP_Export);
     }else if( flags & PS_Local ){
@@ -2152,14 +2193,18 @@ static int ParsePreprocessor(Token *pToken, int flags, int *pPresetFlags){
       pInclude = SafeMalloc( sizeof(Include) + nArg*2 + strlen(zIf) + 10 );
       pInclude->zFile = (char*)&pInclude[1];
       pInclude->zLabel = &pInclude->zFile[nArg+1];
-      sprintf(pInclude->zFile,"%.*s",nArg,zArg);
-      sprintf(pInclude->zLabel,"%.*s:%s",nArg,zArg,zIf);
+      memcpy(pInclude->zFile, zArg, nArg);
+      pInclude->zFile[nArg] = 0;
+      memcpy(pInclude->zLabel, zArg, nArg);
+      pInclude->zLabel[nArg] = ':';
+      memcpy(&pInclude->zLabel[nArg+1], zIf, strlen(zIf)+1);
       pInclude->zIf = &pInclude->zLabel[nArg+1];
       SafeFree(zIf);
     }else{
       pInclude = SafeMalloc( sizeof(Include) + nArg + 1 );
       pInclude->zFile = (char*)&pInclude[1];
-      sprintf(pInclude->zFile,"%.*s",nArg,zArg);
+      memcpy(pInclude->zFile, zArg, nArg);
+      pInclude->zFile[nArg] = 0;
       pInclude->zIf = 0;
       pInclude->zLabel = pInclude->zFile;
     }
@@ -2176,11 +2221,14 @@ static int ParsePreprocessor(Token *pToken, int flags, int *pPresetFlags){
     }
     if( *zArg==0 || *zArg=='\n' ){ return 0; }
     nArg = pToken->nText + (int)(pToken->zText - zArg);
+    if (pToken->zText[pToken->nText-1] == '\r') { nArg--; }
     if( nArg==9 && strncmp(zArg,"INTERFACE",9)==0 ){
       PushIfMacro(0,0,0,pToken->nLine,PS_Interface);
     }else if( nArg==16 && strncmp(zArg,"EXPORT_INTERFACE",16)==0 ){
       PushIfMacro(0,0,0,pToken->nLine,PS_Export);
     }else if( nArg==15 && strncmp(zArg,"LOCAL_INTERFACE",15)==0 ){
+      PushIfMacro(0,0,0,pToken->nLine,PS_Local);
+    }else if( nArg==15 && strncmp(zArg,"MAKEHEADERS_STOPLOCAL_INTERFACE",15)==0 ){
       PushIfMacro(0,0,0,pToken->nLine,PS_Local);
     }else{
       PushIfMacro(0,zArg,nArg,pToken->nLine,0);
@@ -2195,6 +2243,7 @@ static int ParsePreprocessor(Token *pToken, int flags, int *pPresetFlags){
     }
     if( *zArg==0 || *zArg=='\n' ){ return 0; }
     nArg = pToken->nText + (int)(pToken->zText - zArg);
+    if (pToken->zText[pToken->nText-1] == '\r') { nArg--; }
     PushIfMacro("defined",zArg,nArg,pToken->nLine,0);
   }else if( nCmd==6 && strncmp(zCmd,"ifndef",6)==0 ){
     /*
@@ -2206,6 +2255,7 @@ static int ParsePreprocessor(Token *pToken, int flags, int *pPresetFlags){
     }
     if( *zArg==0 || *zArg=='\n' ){ return 0; }
     nArg = pToken->nText + (int)(pToken->zText - zArg);
+    if (pToken->zText[pToken->nText-1] == '\r') { nArg--; }
     PushIfMacro("!defined",zArg,nArg,pToken->nLine,0);
   }else if( nCmd==4 && strncmp(zCmd,"else",4)==0 ){
     /*
@@ -3198,6 +3248,7 @@ static void AddParameters(int index, int *pArgc, char ***pArgv){
       }
     }
   }
+  fclose(in);
   newArgc = argc + nNew - 1;
   for(i=0; i<=index; i++){
     zNew[i] = argv[i];
