@@ -426,35 +426,31 @@ them from the regular C++ keywords with the same meaning) then a prototype for t
 class definition. If none of these keywords appear, then the prototype is not inserted. For example, in the following
 code, the constructor is not explicitly declared in the class definition but makeheaders will add it there because of
 the PUBLIC keyword that appears before the constructor definition.
-
-> ```
-> #if INTERFACE
-> class Example1 {
-> private:
->   int v1;
-> };
-> #endif
-> PUBLIC Example1::Example1(){
->   v1 = 0;
-> }
-> ```
-
+```
+#if INTERFACE
+class Example1 {
+private:
+  int v1;
+};
+#endif
+PUBLIC Example1::Example1(){
+  v1 = 0;
+}
+```
 The code above is equivalent to the following:
-
-> ```
-> #if INTERFACE
-> class Example1 {
-> private:
->   int v1;
-> public:
->   Example1();
-> };
-> #endif
-> Example1::Example1(){
->   v1 = 0;
-> }
-> ```
-
+```
+#if INTERFACE
+class Example1 {
+private:
+  int v1;
+public:
+  Example1();
+};
+#endif
+Example1::Example1(){
+  v1 = 0;
+}
+```
 The first form is preferred because only a single declaration of the constructor is required.  The second form requires
 two declarations, one in the class definition and one on the definition of the constructor.
 
